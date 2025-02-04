@@ -1,0 +1,50 @@
+---
+- hosts: all
+  vars:
+    softether_dir: "/usr/local/libexec/softether/vpncmd"
+    vpncmd: "{{ softether_dir }}/vpncmd"
+    server_password: "server_P@ssw0rd"                    # Set your SoftEther server management password, it must not contain ' or " characters
+    hub_name: "HUB"                                       # Name of new VPN hub
+    username: "vpnuser"                                   # Name of VPN user to create
+    user_password: "user_P@ssw0rd"                        # Password for VPN user, it must not contain ' or " characters
+    psk_key: "psk_P@ssw0rd"                               # PSK for IPsec, it must not contain ' or " characters
+  become: true
+  tasks:
+
+    - name: Allow connections for IPSec
+      iptables:
+        chain: INPUT
+        protocol: udp
+        destination_ports:
+          - "4500"
+          - "500"
+        jump: ACCEPT
+        comment: "Allow traffic for IPSec"
+        action: insert
+        rule_num: 3
+
+    - name: Save iptables rules
+      command: /usr/libexec/iptables/iptables.init save
+      register: iptables_save
+      changed_when: false
+
+    - name: Ensure iptables rules are saved
+      debug:
+        msg: "iptables rules have been saved"
+
+    - name: Ensure SoftEther VPN service is running
+      service:
+        name: vpnserver
+        state: started
+        enabled: yes
+
+    - name: Enable IPsec
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /CMD IPsecEnable /L2TP:yes /L2TPRAW:no /ETHERIP:no /PSK:{{ psk_key }} /DEFAULTHUB:{{ hub_name }}
+      register: ipsec_enable
+      changed_when: "'completed' in ipsec_enable.stdout"
+    
+
+
+
+
