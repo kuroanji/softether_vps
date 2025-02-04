@@ -1,0 +1,713 @@
+---
+- hosts: all
+  vars:
+    static_ip: "0.0.0.0"                                  # Replace with your static IP address
+    vps_ip: "0.0.0.0"                                     # Replace with your VPS IP address
+    tap_vpn_subnet: "192.168.7.0/24"
+    softether_dir: "/usr/local/libexec/softether/vpncmd"
+    vpncmd: "{{ softether_dir }}/vpncmd"
+    server_password: "server_P@ssw0rd"                    # Set your SoftEther server management password, it must not contain ' or " characters
+    hub_name: "HUB"                                       # Name of new VPN hub
+    hub_password: "hub_P@ssw0rd"                          # Set your SoftEther hub password, it must not contain ' or " characters
+    username: "vpnuser"                                   # Name of VPN user to create
+    user_password: "user_P@ssw0rd"                        # Password for VPN user, it must not contain ' or " characters
+    tap_device: "tap_soft"
+    softether_config_file: "/usr/local/libexec/softether/vpnserver/vpn_server.config"
+  become: true
+  gather_facts: yes                                       # Ensure facts are gathered
+  tasks:
+
+    - name: Check that swap file exists
+      stat:
+        path: /swapfile
+      register: swap_file
+
+    - name: Create and enable swap
+      block:
+
+        - name: Ensure swap file exists
+          command: >
+            fallocate -l 2G /swapfile
+            creates=/swapfile
+
+        - name: Set correct permissions for the swap file
+          file:
+            path: /swapfile
+            mode: '0600'
+            owner: root
+            group: root
+
+        - name: Set up the swap file
+          command: mkswap /swapfile
+
+        - name: Enable the swap file
+          command: swapon /swapfile
+
+        - name: Add swap file to /etc/fstab
+          lineinfile:
+            path: /etc/fstab
+            line: /swapfile swap swap defaults 0 0
+            create: yes
+
+        - name: Verify swap is active
+          command: swapon --show
+          register: swap_status
+          changed_when: false
+
+        - name: Display swap status
+          debug:
+            var: swap_status.stdout
+
+      when: swap_file.stat.exist is not defined
+
+    - name: Update all packages (CentOS/RHEL/Fedora)
+      yum:
+        name: "*"
+        state: latest
+
+    - name: Ensure EPEL repository is enabled
+      yum:
+        name: epel-release
+        state: present
+
+    - name: Create Cloudflare repository file
+      copy:
+        dest: /etc/yum.repos.d/cloudflared-stable.repo
+        content: |
+          [cloudflared-stable]
+          name=cloudflared-stable
+          baseurl=https://pkg.cloudflare.com/cloudflared/rpm
+          enabled=1
+          type=rpm
+          gpgcheck=1
+          gpgkey=https://pkg.cloudflare.com/cloudflare-ascii-pubkey.gpg
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Clean yum cache
+      command: yum clean all
+
+    - name: Update yum cache
+      command: yum makecache
+
+    - name: Install build dependencies and required packages (RedHat/CentOS)
+      package:
+        name:
+          - cmake
+          - gcc
+          - g++
+          - make
+          - readline-devel
+          - ncurses-devel
+          - openssl-devel
+          - libsodium-devel
+          - readline-devel
+          - zlib-devel
+          - pkgconf
+          - dnsmasq
+          - git
+          - net-tools
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - cloudflared
+          - logrotate
+          - sshguard
+          - iptables-services
+        state: present
+
+    - name: Enable and start iptables service
+      service:
+        name: iptables
+        state: started
+        enabled: yes
+
+    - name: Flush all rules in all chains
+      ansible.builtin.iptables:
+        flush: yes
+
+    - name: Set default policies to ACCEPT (optional)
+      ansible.builtin.iptables:
+        chain: INPUT
+        policy: ACCEPT
+      when: flush_all_chains | default(false)
+
+    - name: Set default policies to ACCEPT (optional)
+      ansible.builtin.iptables:
+        chain: FORWARD
+        policy: ACCEPT
+      when: flush_all_chains | default(false)
+
+    - name: Set default policies to ACCEPT (optional)
+      ansible.builtin.iptables:
+        chain: OUTPUT
+        policy: ACCEPT
+      when: flush_all_chains | default(false)
+
+    - name: Allow SSH access from a specific static IP
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        source: "{{ static_ip }}"
+        destination_port: 22
+        jump: ACCEPT
+        comment: "Allow SSH from static IP"
+
+    - name: Allow connections for SoftEther
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_ports:
+          - "443"
+        #  - "992"
+        #  - "5555"
+        jump: ACCEPT
+        comment: "Allow traffic for SoftEther, WireGuard"
+
+    - name: Allow all traffic on the loopback interface
+      iptables:
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+        comment: "Allow all traffic on loopback"
+
+    - name: Allow incoming traffic on tap_soft interface
+      iptables:
+        chain: INPUT
+        in_interface: tap_soft
+        jump: ACCEPT
+        comment: "Allow all traffic on tap interface"
+
+    - name: Allow established and related connections
+      iptables:
+        chain: INPUT
+        match: conntrack
+        ctstate: "RELATED,ESTABLISHED"
+        jump: ACCEPT
+        comment: "Allow established and related connections in INPUT"
+
+    - name: Configure SNAT for the 192.168.7.0/24 subnet
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "192.168.7.0/24"
+        jump: SNAT
+        to_source: "{{ vps_ip }}"
+        comment: "SNAT for 192.168.7.0/24 subnet"
+
+    - name: Set default policy for INPUT chain to DROP
+      iptables:
+        chain: INPUT
+        policy: DROP
+        comment: "Set INPUT chain policy to DROP"
+
+    - name: Save iptables rules
+      command: /usr/libexec/iptables/iptables.init save
+      register: iptables_save
+      changed_when: false
+
+    - name: Ensure iptables rules are saved
+      debug:
+        msg: "iptables rules have been saved"
+
+    - name: Check if firewalld installed
+      service_facts:
+    - debug:
+        msg: firewalld installed!
+      when: ansible_facts.services['firewalld.service'] is defined
+
+    - name: Stop, disable and mask firewalld service
+      ansible.builtin.systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
+        masked: yes
+      when: ansible_facts.services['firewalld.service'] is defined
+
+    - name: Add lines to /etc/dnsmasq.conf
+      blockinfile:
+        path: /etc/dnsmasq.conf
+        block: |
+          bind-interfaces
+          interface=tap_soft
+          dhcp-range=tap_soft,192.168.7.50,192.168.7.70,12h
+          dhcp-option=tap_soft,3,192.168.7.1
+          server=127.0.0.1#5053
+          domain-needed
+          bogus-priv
+          no-hosts
+          neg-ttl=3600
+          no-poll
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - DNSMASQ CONFIG"
+        create: yes
+
+    - name: add to dnsmasq.service
+      lineinfile:
+        path: /usr/lib/systemd/system/dnsmasq.service
+        insertafter: 'After=network.target'
+        line: "After=vpnserver.service"
+
+    - name: Verify cloudflared installation
+      command: cloudflared --version
+      register: cloudflared_version
+      changed_when: false
+
+    - name: Debug cloudflared version
+      debug:
+        msg: "Installed cloudflared version: {{ cloudflared_version.stdout }}"
+
+    - name: Create cloudflared.conf
+      ansible.builtin.lineinfile:
+        path: /etc/default/cloudflared
+        line: CLOUDFLARED_OPTS=--port 5053 --upstream https://1.1.1.1/dns-query --upstream https://1.0.0.1/dns-query
+        create: yes
+    
+    - name: Add cloudflared user
+      ansible.builtin.shell: |
+        useradd -s /usr/sbin/nologin -r -M cloudflared
+        chown cloudflared:cloudflared /etc/default/cloudflared
+        chown cloudflared:cloudflared /usr/local/bin/cloudflared
+    
+    - name: Create cloudflared.service file
+      copy:
+        dest: /etc/systemd/system/cloudflared.service
+        content: |
+          [Unit]
+          After=syslog.target network-online.target
+
+          [Service]
+          User=cloudflared
+          EnvironmentFile=/etc/default/cloudflared
+          ExecStart=/usr/local/bin/cloudflared proxy-dns $CLOUDFLARED_OPTS
+          Restart=on-failure
+          RestartSec=10
+          KillMode=process
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+        force: yes
+
+    - name: Enable and start cloudflared service
+      service:
+        name: cloudflared
+        state: started
+        enabled: yes
+
+    - ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: true
+        state: present
+        reload: true
+
+    - name: Configure Git global settings
+      command: "{{ item }}"
+      with_items:
+        - git config --global user.email "user@mail"
+        - git config --global user.name "user"
+        - git config --global core.compression 0
+        - git config --global http.maxRequestBuffer 100M
+
+    - name: Clone softether repo  
+      ansible.builtin.git:
+        repo: https://github.com/SoftEtherVPN/SoftEtherVPN.git
+        dest: /tmp/softether-sources
+        recursive: yes
+        update: yes
+        version: master
+      register: softether_source_unpack
+
+    - name: Add remote repository (akr)
+      command: git remote add akr https://github.com/a-kr/SoftEtherVPN.git
+      args:
+        chdir: /tmp/softether-sources
+
+    - name: Fetch specific branch from remote (akr)
+      command: git fetch akr restrict-json-rpc-api-by-ip
+      args:
+        chdir: /tmp/softether-sources
+
+    - name: Merge fetched branch into current branch
+      command: git merge akr/restrict-json-rpc-api-by-ip
+      args:
+        chdir: /tmp/softether-sources
+
+    - name: Verify the merge
+      command: git log -1
+      args:
+        chdir: /tmp/softether-sources
+      register: git_log
+      changed_when: false
+
+    - name: Debug Git log
+      debug:
+        msg: "Latest commit after merge: {{ git_log.stdout }}"
+
+    - name: Configuring softether source
+      shell: ./configure
+      args:
+        chdir: "/tmp/softether-sources"
+      when: softether_source_unpack
+      register: softhether_configure
+
+    - name: Installing Softether
+      shell: make -C build && make -C build install
+      args:
+        chdir: "/tmp/softether-sources"
+      when: softhether_configure
+
+    - name: Create the SoftEther init script
+      copy:
+        dest: /usr/local/libexec/softether/vpnserver/vpnserver-init.sh
+        content: |
+          #!/bin/sh
+          ### BEGIN INIT INFO
+          # Provides:          vpnserver
+          # Required-Start:    $remote_fs $syslog
+          # Required-Stop:     $remote_fs $syslog
+          # Default-Start:     2 3 4 5
+          # Default-Stop:      0 1 6
+          # Short-Description: Start daemon at boot time
+          # Description:       Enable Softether by daemon.
+          ### END INIT INFO
+          DAEMON=/usr/local/libexec/softether/vpnserver/vpnserver
+          LOCK=/var/lock/subsys/vpnserver
+          TAP_ADDR=192.168.7.1
+
+          test -x $DAEMON || exit 0
+          case "$1" in
+          start)
+          $DAEMON start
+          touch $LOCK
+          sleep 1
+          /sbin/ifconfig tap_soft $TAP_ADDR
+          ;;
+          stop)
+          $DAEMON stop
+          rm $LOCK
+          ;;
+          restart)
+          $DAEMON stop
+          sleep 3
+          $DAEMON start
+          sleep 1
+          /sbin/ifconfig tap_soft $TAP_ADDR
+          ;;
+          *)
+          echo "Usage: $0 {start|stop|restart}"
+          exit 1
+          esac
+          exit 0
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Create the systemd service unit file
+      copy:
+        dest: /etc/systemd/system/vpnserver.service
+        content: |
+          [Unit]
+          Description=SoftEther VPN Server
+          After=network.target
+
+          [Service]
+          Type=forking
+          ExecStart=/usr/local/libexec/softether/vpnserver/vpnserver-init.sh start
+          ExecStop=/usr/local/libexec/softether/vpnserver/vpnserver-init.sh stop
+          ExecReload=/usr/local/libexec/softether/vpnserver/vpnserver-init.sh restart
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Reload systemd daemon to apply changes
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start vpnserver service
+      service:
+        name: vpnserver
+        state: started
+        enabled: yes
+
+    - name: Stop vpnserver service
+      service:
+        name: vpnserver
+        state: stopped
+
+    - name: Disable DDNS in SoftEther config_file
+      shell: sed -i '19s/false/true/' {{ softether_config_file }}
+
+    - name: Disable JSON RPC API in SoftEther config_file
+      shell: sed -i '96s/false/true/' {{ softether_config_file }}
+
+    - name: Disable OVPN in SoftEther config_file
+      shell: sed -i '163s/true/false/' {{ softether_config_file }}
+
+    - name: Start vpnserver service
+      service:
+        name: vpnserver
+        state: started
+
+    - name: Gather network facts
+      ansible.builtin.setup:
+        gather_subset:
+          - network
+
+    - name: Determine the primary physical interface
+      ansible.builtin.set_fact:
+        physical_interface: "{{ ansible_default_ipv4.interface }}"
+
+    - name: Debug physical interface
+      ansible.builtin.debug:
+        msg: "Detected physical interface: {{ physical_interface }}"
+
+    - name: Ensure SoftEther VPN service is running
+      service:
+        name: vpnserver
+        state: started
+        enabled: yes
+
+    - name: Set SoftEther VPN server password
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:none /CMD ServerPasswordSet {{ server_password }}
+      register: set_server_password
+      changed_when: "'completed' in set_server_password.stdout"
+
+    - name: Create a new VPN hub
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /CMD HubCreate {{ hub_name }} /PASSWORD:{{ hub_password }}
+      register: create_hub
+      changed_when: "'completed' in create_hub.stdout"
+
+    - name: Delete DEFAULT VPN hub
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /CMD HubDelete DEFAULT
+      register: delete_hub
+      changed_when: "'completed' in delete_hub.stdout"
+
+    - name: Disable DDNS
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /CMD KeepDisable
+      register: ddns_disable
+      changed_when: "'completed' in ddns_disable.stdout"
+
+    - name: Change cipher protocol
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /CMD ServerCipherSet TLS_CHACHA20_POLY1305_SHA256
+      register: cipher_change
+      changed_when: "'completed' in cipher_change.stdout"
+
+    - name: Packet log disable
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /ADMINHUB:{{ hub_name }} /CMD LogDisable packet
+      register: packetlog_disable
+      changed_when: "'completed' in packetlog_disable.stdout"
+
+    - name: Security log disable
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /ADMINHUB:{{ hub_name }} /CMD LogDisable security
+      register: securitylog_disable
+      changed_when: "'completed' in securitylog_disable.stdout"
+
+    - name: Create VPN user
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /ADMINHUB:{{ hub_name }} /CMD UserCreate {{ username }} /GROUP:none /REALNAME:none /NOTE:none
+      register: create_user
+      changed_when: "'completed' in create_user.stdout"
+
+    - name: Set user password in the specified VPN hub
+      command: >
+        {{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /ADMINHUB:{{ hub_name }} /CMD UserPasswordSet {{ username }} /PASSWORD:{{ user_password }}
+      register: set_user_password
+      changed_when: "'completed' in set_user_password.stdout"
+
+    - name: Create a new TAP device
+      command: "{{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /CMD TapCreate {{ tap_device }}"
+      args:
+       creates: "/dev/net/tun"
+
+    - name: Create a local bridge between the VPN hub and the physical interface
+      command: "{{ vpncmd }} localhost /SERVER /PASSWORD:{{ server_password }} /ADMINHUB:{{ hub_name }} /CMD BridgeCreate {{ hub_name }} /DEVICE:soft /TAP=yes"
+      register: bridge_create
+      failed_when: "'already exists' not in bridge_create.stderr and bridge_create.rc != 0"
+
+    - name: Bring up the tap_soft interface
+      command: ifconfig tap_soft
+      register: ifconfig_result
+
+    - name: Display ifconfig output
+      debug:
+        var: ifconfig_result.stdout
+
+    - name: Enable and start dnsmasq service
+      service:
+        name: dnsmasq
+        state: started
+        enabled: yes
+
+    - name: Find all files in /etc/logrotate.d
+      find:
+        paths: /etc/logrotate.d
+        patterns: "*"
+        recurse: no
+      register: logrotate_files
+
+    - name: Remove all files in /etc/logrotate.d
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      with_items: "{{ logrotate_files.files }}"
+
+    - name: Create a custom logrotate configuration for all logs
+      copy:
+        dest: /etc/logrotate.d/all_logs
+        content: |
+          /var/log/*.log {
+              daily
+              missingok
+              rotate 7
+              compress
+              delaycompress
+              notifempty
+              create 0640 root adm
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+          /var/log/**/*.log {
+              daily
+              missingok
+              rotate 7
+              compress
+              delaycompress
+              notifempty
+              create 0640 root adm
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+          /usr/local/libexec/softether/vpnserver/*.log {
+              daily
+              missingok
+              rotate 7
+              compress
+              delaycompress
+              notifempty
+              create 0640 root adm
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+          /usr/local/libexec/softether/vpnserver/**/*.log {
+              daily
+              missingok
+              rotate 7
+              compress
+              delaycompress
+              notifempty
+              create 0640 root adm
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+        owner: root
+        group: root
+        mode: '0644'
+        force: yes
+
+    - name: Enable and start logrotate service
+      service:
+        name: logrotate
+        state: started
+        enabled: yes
+
+    - name: Configure sshguard
+      copy:
+        dest: /etc/sshguard.conf
+        content: |
+          # sshguard configuration file
+          BACKEND="/usr/libexec/sshg-fw-iptables"
+          THRESHOLD=30
+          BLOCK_TIME=1200
+          DETECTION_TIME=1800
+          WHITELIST_FILE="/etc/sshguard.whitelist"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Ensure sshguard service is enabled and started
+      service:
+        name: sshguard
+        state: started
+        enabled: yes
+
+    - name: Add dns=none to [main] section in NetworkManager.conf
+      ini_file:
+        path: /etc/NetworkManager/NetworkManager.conf
+        section: main
+        option: dns
+        value: none
+        create: yes
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Add rc-manager=unmanaged to [main] section in NetworkManager.conf
+      ini_file:
+        path: /etc/NetworkManager/NetworkManager.conf
+        section: main
+        option: rc-manager
+        value: unmanaged
+        create: yes
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Ensure /etc/resolv.conf has correct nameservers
+      copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 127.0.0.1
+        owner: root
+        group: root
+        mode: '0644'
+        force: yes
+
+    - name: Restart NetworkManager to apply changes
+      systemd:
+        name: NetworkManager
+        state: restarted
+
+    - name: Reboot VPS
+      ansible.builtin.reboot:
+        reboot_timeout: 600  # Wait up to 10 minutes for the system to come back online
+        connect_timeout: 60  # Wait up to 1 minute for the connection to be re-established
+        pre_reboot_delay: 0  # Wait 0 seconds before initiating the reboot
+        post_reboot_delay: 30  # Wait 30 seconds after the reboot before continuing
+
+    #- name: Remove SSH access from a specific static IP
+    #  iptables:
+    #    chain: INPUT
+    #    protocol: tcp
+    #    source: "{{ static_ip }}"
+    #    destination_port: 22
+    #    jump: ACCEPT
+    #    comment: "Allow SSH from static IP"
+    #    state: absent
+    
+
+
+
+
