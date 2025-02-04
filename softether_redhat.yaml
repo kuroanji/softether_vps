@@ -640,6 +640,12 @@
         mode: '0644'
         force: yes
 
+    - name: Enable and start logrotate service
+      service:
+        name: logrotate
+        state: started
+        enabled: yes
+
     - name: Install sshguard
       yum:
         name: sshguard
