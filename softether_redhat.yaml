@@ -566,6 +566,19 @@
         name: logrotate
         state: present
 
+    - name: Find all files in /etc/logrotate.d
+      find:
+        paths: /etc/logrotate.d
+        patterns: "*"
+        recurse: no
+      register: logrotate_files
+
+    - name: Remove all files in /etc/logrotate.d
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      with_items: "{{ logrotate_files.files }}"
+
     - name: Create a custom logrotate configuration for all logs
       copy:
         dest: /etc/logrotate.d/all_logs
