@@ -5,8 +5,6 @@
     vpncmd: "{{ softether_dir }}/vpncmd"
     server_password: "server_P@ssw0rd"                    # Set your SoftEther server management password, it must not contain ' or " characters
     hub_name: "HUB"                                       # Name of new VPN hub
-    username: "vpnuser"                                   # Name of VPN user to create
-    user_password: "user_P@ssw0rd"                        # Password for VPN user, it must not contain ' or " characters
     psk_key: "psk_P@ssw0rd"                               # PSK for IPsec, it must not contain ' or " characters
   become: true
   tasks:
