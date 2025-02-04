@@ -59,14 +59,10 @@
         name: iptables-services
         state: present
 
-    - name: Start iptables service
-      systemd:
+    - name: Enable and start iptables service
+      service:
         name: iptables
         state: started
-
-    - name: Enable iptables service to start on boot
-      systemd:
-        name: iptables
         enabled: yes
 
     - name: Flush all rules in all chains
@@ -157,20 +153,13 @@
       debug:
         msg: "iptables rules have been saved"
 
-    - name: Stop firewalld service
+    - name: Stop, disable and mask firewalld service
       ansible.builtin.systemd:
         name: firewalld
         state: stopped
-
-    - name: Disable firewalld service
-      ansible.builtin.systemd:
-        name: firewalld
         enabled: no
-
-    - name: Mask firewalld service
-      ansible.builtin.systemd:
-        name: firewalld
         masked: yes
+      when: "'firewalld' in ansible_facts.packages"
 
     - name: Ensure EPEL repository is enabled
       yum:
@@ -295,11 +284,11 @@
         mode: "0644"
         force: yes
 
-    - name: Enable cloudflared service
-      ansible.builtin.shell: |
-        systemctl enable cloudflared
-        systemctl start cloudflared
-        systemctl status cloudflared
+    - name: Enable and start cloudflared service
+      service:
+        name: cloudflared
+        state: started
+        enabled: yes
 
     - name: Ensure net.ipv4.ip_forward is enabled in sysctl.conf
       lineinfile:
@@ -566,11 +555,11 @@
       debug:
         var: ifconfig_result.stdout
 
-    - name: Enable dnsmasq service
-      ansible.builtin.shell: |
-        systemctl enable dnsmasq
-        systemctl start dnsmasq
-        systemctl status dnsmasq
+    - name: Enable and start dnsmasq service
+      service:
+        name: dnsmasq
+        state: started
+        enabled: yes
 
     - name: Ensure logrotate is installed
       package:
@@ -608,6 +597,19 @@
               endscript
           }
           /usr/local/libexec/softether/vpnserver/*.log {
+              daily
+              missingok
+              rotate 7
+              compress
+              delaycompress
+              notifempty
+              create 0640 root adm
+              sharedscripts
+              postrotate
+                  /usr/lib/rsyslog/rsyslog-rotate
+              endscript
+          }
+          /usr/local/libexec/softether/vpnserver/**/*.log {
               daily
               missingok
               rotate 7
