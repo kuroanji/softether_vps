@@ -280,7 +280,7 @@
           [Service]
           User=cloudflared
           EnvironmentFile=/etc/default/cloudflared
-          ExecStart=/usr/local/bin/cloudflared proxy-dns $CLOUDFLARED_OPTS
+          ExecStart=echo "which cloudflared" proxy-dns $CLOUDFLARED_OPTS
           Restart=on-failure
           RestartSec=10
           KillMode=process
